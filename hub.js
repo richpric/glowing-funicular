@@ -2435,22 +2435,49 @@ app.use(function (err, _req, res, _next) {
   res.status(500).json({ error: 'Internal server error.' });
 });
 
-/* ---------- TELEGRAM BOT (FIXED) ---------- */
+/* ---------- TELEGRAM BOT (ROBUST) ---------- */
 /*
- * Fixes applied:
- *  1. Wait for getMe() to succeed BEFORE starting polling — avoids 401 spam
- *     and makes bad tokens fail fast and visibly.
- *  2. Register bot commands via setMyCommands so /start appears in the menu.
- *  3. /start always sends something the user can tap:
- *       - web_app button when Mini App URL is HTTPS and valid
- *       - fallback URL button when Mini App URL is not HTTPS
- *       - plain text with the URL when no Mini App URL is set
- *  4. Handle both `/start` and `/start@botname`.
- *  5. Catch web_app_data events.
- *  6. Non-command messages get a helpful reply.
- *  7. Polling errors are logged with the actual Telegram description.
+ * Key fixes vs. the broken version:
+ *  - Robust require(): handles CJS default export and ESM-interop shape.
+ *    Old code did `TelegramBot = require(...)` directly, which threw
+ *    "TelegramBot is not a constructor" when the module exported
+ *    `{ default: TelegramBot }`.
+ *  - Validates the constructor is a function BEFORE calling `new`.
+ *  - Verifies token with getMe() BEFORE starting polling.
+ *  - Registers /start + /test in setMyCommands.
+ *  - /start always produces a tappable button (web_app when HTTPS, else url).
+ *  - Non-command messages get a fallback reply.
  */
 let bot = null;
+
+function loadTelegramBotConstructor() {
+  let mod;
+  try {
+    mod = require('node-telegram-bot-api');
+  } catch (e) {
+    console.error('[bot] node-telegram-bot-api not installed:', e.message);
+    return null;
+  }
+
+  // Accept all known shapes:
+  //   module.exports = TelegramBot
+  //   module.exports.default = TelegramBot
+  //   module.exports.TelegramBot = TelegramBot
+  let Ctor = null;
+  if (typeof mod === 'function') Ctor = mod;
+  else if (mod && typeof mod.default === 'function') Ctor = mod.default;
+  else if (mod && typeof mod.TelegramBot === 'function') Ctor = mod.TelegramBot;
+
+  if (typeof Ctor !== 'function') {
+    console.error('[bot] node-telegram-bot-api loaded but exports no constructor.');
+    console.error('[bot]   typeof module =', typeof mod);
+    if (mod && typeof mod === 'object') {
+      console.error('[bot]   keys =', Object.keys(mod).join(', ') || '(none)');
+    }
+    return null;
+  }
+  return Ctor;
+}
 
 function startTelegramBot() {
   if (!CONFIG.botToken) {
@@ -2459,108 +2486,109 @@ function startTelegramBot() {
   }
 
   if (!/^\d+:[A-Za-z0-9_-]{30,}$/.test(CONFIG.botToken)) {
-    console.error('[bot] BOT_TOKEN has an unexpected format — expected "123456:ABC-DEF…". Bot disabled.');
+    console.error('[bot] BOT_TOKEN has an unexpected format — bot disabled.');
     return;
   }
 
-  let TelegramBot;
+  const TelegramBot = loadTelegramBotConstructor();
+  if (!TelegramBot) {
+    console.error('[bot] Bot disabled (constructor unavailable).');
+    return;
+  }
+
   try {
-    TelegramBot = require('node-telegram-bot-api');
+    // polling: false — we start it manually after getMe() succeeds
+    bot = new TelegramBot(CONFIG.botToken, { polling: false });
   } catch (e) {
-    console.error('[bot] node-telegram-bot-api not installed:', e.message);
+    console.error('[bot] Failed to construct bot:', e.message);
+    bot = null;
     return;
   }
 
-  // Create without polling, validate first, then start polling.
-  bot = new TelegramBot(CONFIG.botToken, { polling: false });
+  console.log('[bot] creating bot instance...');
 
   bot.getMe()
     .then(function (me) {
       console.log('[bot] authenticated as @' + me.username + ' (id ' + me.id + ')');
-
-      // Register command menu so /start is visible to users.
       return bot.setMyCommands([
         { command: 'start', description: 'Open the Priv L7 Hub' },
         { command: 'test',  description: 'Check bot status' }
       ]).catch(function (e) { console.warn('[bot] setMyCommands failed:', e.message); });
     })
     .then(function () {
-      // Now that the token is verified, start polling.
+      // Register handlers BEFORE polling starts so no message is missed.
+      registerBotHandlers();
+
       try {
         bot.startPolling({ restart: true, interval: 2000, params: { timeout: 10 } });
+        console.log('[bot] polling started');
       } catch (e) {
         console.error('[bot] startPolling failed:', e.message);
       }
     })
     .catch(function (e) {
       console.error('[bot] FATAL: token rejected by Telegram —', e.message);
-      console.error('[bot] Bot is disabled. Check BOT_TOKEN and restart.');
+      console.error('[bot] Bot is disabled. Check BOT_TOKEN and restart the service.');
       try { bot.stopPolling(); } catch (_) {}
       bot = null;
     });
+}
 
-  // ---- /start ----
+function registerBotHandlers() {
+  if (!bot) return;
+
+  // ---- /start and /start@botname ----
   bot.onText(/^\/start(?:@\w+)?(?:\s|$)/, async function (msg) {
     const chatId = msg.chat.id;
     const appUrl = CONFIG.miniAppUrl;
 
-    // No Mini App configured — tell the user plainly.
     if (!appUrl) {
       return bot.sendMessage(
         chatId,
         'Welcome to *Priv L7 Hub*!\n\n' +
-        'The Mini App URL has not been configured yet. ' +
-        'If you are the admin, set MINI_APP_URL and restart the service.',
+        'The Mini App URL is not configured yet. ' +
+        'If you are the admin, set MINI_APP_URL in /etc/privhub/hub.env and restart.',
         { parse_mode: 'Markdown' }
       ).catch(function (e) { console.error('[bot] /start sendMessage failed:', e.message); });
     }
 
     const isHttps = /^https:\/\//i.test(appUrl);
 
-    // HTTPS URL → use the native web_app button.
     if (isHttps) {
-      const opts = {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '🚀 Open L7 Hub', web_app: { url: appUrl } }
-          ]]
-        }
-      };
       try {
         return await bot.sendMessage(
           chatId,
           'Welcome to *Priv L7 Hub*!\n\nTap the button below to open your dashboard.',
-          opts
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🚀 Open L7 Hub', web_app: { url: appUrl } }]]
+            }
+          }
         );
       } catch (e) {
         console.error('[bot] web_app sendMessage failed:', e.message);
-        // Fall through to URL fallback below.
+        // fall through to URL button
       }
     }
 
-    // Non-HTTPS or web_app failed → send a plain URL button.
-    const fallbackKeyboard = {
-      inline_keyboard: [[
-        { text: '🚀 Open L7 Hub', url: appUrl }
-      ]]
-    };
+    // Non-HTTPS or web_app failure → plain URL button.
     try {
       await bot.sendMessage(
         chatId,
         'Welcome to *Priv L7 Hub*!\n\n' +
         'Open your dashboard here:\n' + appUrl + '\n\n' +
         (isHttps ? '' : '⚠️ Telegram WebApps require HTTPS. Ask the admin to enable SSL.'),
-        { parse_mode: 'Markdown', reply_markup: fallbackKeyboard, disable_web_page_preview: true }
+        {
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '🚀 Open L7 Hub', url: appUrl }]] },
+          disable_web_page_preview: true
+        }
       );
     } catch (e) {
       console.error('[bot] fallback sendMessage failed:', e.message);
-      // Last resort: plain text, no keyboard.
-      try {
-        await bot.sendMessage(chatId, 'Open the hub: ' + appUrl);
-      } catch (e2) {
-        console.error('[bot] plain sendMessage failed:', e2.message);
-      }
+      try { await bot.sendMessage(chatId, 'Open the hub: ' + appUrl); }
+      catch (e2) { console.error('[bot] plain sendMessage failed:', e2.message); }
     }
   });
 
