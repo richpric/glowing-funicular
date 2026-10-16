@@ -2,8 +2,11 @@
 'use strict';
 
 /*
- * Priv L7 Hub — single-file edition (multi-method)
+ * Priv L7 Hub — web + API server
  * Run: node hub.js
+ *
+ * This file intentionally does NOT talk to Telegram. The bot is a
+ * separate process (bot.js) that lives in the same directory.
  */
 
 const fs = require('node:fs');
@@ -116,8 +119,6 @@ const CONFIG = Object.freeze({
   backupDir: path.join(SCRIPT_DIR, 'privflood-backups'),
   backupKeep: 30,
   defaultCooldown: Number(process.env.DEFAULT_COOLDOWN || 20),
-  botToken: process.env.BOT_TOKEN || '',
-  miniAppUrl: process.env.MINI_APP_URL || '',
   hubDomain: process.env.HUB_DOMAIN || '',
   contactUrl: 'https://t.me/privflood'
 });
@@ -2435,209 +2436,6 @@ app.use(function (err, _req, res, _next) {
   res.status(500).json({ error: 'Internal server error.' });
 });
 
-/* ---------- TELEGRAM BOT (ROBUST) ---------- */
-/*
- * Key fixes vs. the broken version:
- *  - Robust require(): handles CJS default export and ESM-interop shape.
- *    Old code did `TelegramBot = require(...)` directly, which threw
- *    "TelegramBot is not a constructor" when the module exported
- *    `{ default: TelegramBot }`.
- *  - Validates the constructor is a function BEFORE calling `new`.
- *  - Verifies token with getMe() BEFORE starting polling.
- *  - Registers /start + /test in setMyCommands.
- *  - /start always produces a tappable button (web_app when HTTPS, else url).
- *  - Non-command messages get a fallback reply.
- */
-let bot = null;
-
-function loadTelegramBotConstructor() {
-  let mod;
-  try {
-    mod = require('node-telegram-bot-api');
-  } catch (e) {
-    console.error('[bot] node-telegram-bot-api not installed:', e.message);
-    return null;
-  }
-
-  // Accept all known shapes:
-  //   module.exports = TelegramBot
-  //   module.exports.default = TelegramBot
-  //   module.exports.TelegramBot = TelegramBot
-  let Ctor = null;
-  if (typeof mod === 'function') Ctor = mod;
-  else if (mod && typeof mod.default === 'function') Ctor = mod.default;
-  else if (mod && typeof mod.TelegramBot === 'function') Ctor = mod.TelegramBot;
-
-  if (typeof Ctor !== 'function') {
-    console.error('[bot] node-telegram-bot-api loaded but exports no constructor.');
-    console.error('[bot]   typeof module =', typeof mod);
-    if (mod && typeof mod === 'object') {
-      console.error('[bot]   keys =', Object.keys(mod).join(', ') || '(none)');
-    }
-    return null;
-  }
-  return Ctor;
-}
-
-function startTelegramBot() {
-  if (!CONFIG.botToken) {
-    console.log('[bot] BOT_TOKEN not set — Telegram bot disabled.');
-    return;
-  }
-
-  if (!/^\d+:[A-Za-z0-9_-]{30,}$/.test(CONFIG.botToken)) {
-    console.error('[bot] BOT_TOKEN has an unexpected format — bot disabled.');
-    return;
-  }
-
-  const TelegramBot = loadTelegramBotConstructor();
-  if (!TelegramBot) {
-    console.error('[bot] Bot disabled (constructor unavailable).');
-    return;
-  }
-
-  try {
-    // polling: false — we start it manually after getMe() succeeds
-    bot = new TelegramBot(CONFIG.botToken, { polling: false });
-  } catch (e) {
-    console.error('[bot] Failed to construct bot:', e.message);
-    bot = null;
-    return;
-  }
-
-  console.log('[bot] creating bot instance...');
-
-  bot.getMe()
-    .then(function (me) {
-      console.log('[bot] authenticated as @' + me.username + ' (id ' + me.id + ')');
-      return bot.setMyCommands([
-        { command: 'start', description: 'Open the Priv L7 Hub' },
-        { command: 'test',  description: 'Check bot status' }
-      ]).catch(function (e) { console.warn('[bot] setMyCommands failed:', e.message); });
-    })
-    .then(function () {
-      // Register handlers BEFORE polling starts so no message is missed.
-      registerBotHandlers();
-
-      try {
-        bot.startPolling({ restart: true, interval: 2000, params: { timeout: 10 } });
-        console.log('[bot] polling started');
-      } catch (e) {
-        console.error('[bot] startPolling failed:', e.message);
-      }
-    })
-    .catch(function (e) {
-      console.error('[bot] FATAL: token rejected by Telegram —', e.message);
-      console.error('[bot] Bot is disabled. Check BOT_TOKEN and restart the service.');
-      try { bot.stopPolling(); } catch (_) {}
-      bot = null;
-    });
-}
-
-function registerBotHandlers() {
-  if (!bot) return;
-
-  // ---- /start and /start@botname ----
-  bot.onText(/^\/start(?:@\w+)?(?:\s|$)/, async function (msg) {
-    const chatId = msg.chat.id;
-    const appUrl = CONFIG.miniAppUrl;
-
-    if (!appUrl) {
-      return bot.sendMessage(
-        chatId,
-        'Welcome to *Priv L7 Hub*!\n\n' +
-        'The Mini App URL is not configured yet. ' +
-        'If you are the admin, set MINI_APP_URL in /etc/privhub/hub.env and restart.',
-        { parse_mode: 'Markdown' }
-      ).catch(function (e) { console.error('[bot] /start sendMessage failed:', e.message); });
-    }
-
-    const isHttps = /^https:\/\//i.test(appUrl);
-
-    if (isHttps) {
-      try {
-        return await bot.sendMessage(
-          chatId,
-          'Welcome to *Priv L7 Hub*!\n\nTap the button below to open your dashboard.',
-          {
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [[{ text: '🚀 Open L7 Hub', web_app: { url: appUrl } }]]
-            }
-          }
-        );
-      } catch (e) {
-        console.error('[bot] web_app sendMessage failed:', e.message);
-        // fall through to URL button
-      }
-    }
-
-    // Non-HTTPS or web_app failure → plain URL button.
-    try {
-      await bot.sendMessage(
-        chatId,
-        'Welcome to *Priv L7 Hub*!\n\n' +
-        'Open your dashboard here:\n' + appUrl + '\n\n' +
-        (isHttps ? '' : '⚠️ Telegram WebApps require HTTPS. Ask the admin to enable SSL.'),
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '🚀 Open L7 Hub', url: appUrl }]] },
-          disable_web_page_preview: true
-        }
-      );
-    } catch (e) {
-      console.error('[bot] fallback sendMessage failed:', e.message);
-      try { await bot.sendMessage(chatId, 'Open the hub: ' + appUrl); }
-      catch (e2) { console.error('[bot] plain sendMessage failed:', e2.message); }
-    }
-  });
-
-  // ---- /test ----
-  bot.onText(/^\/test(?:@\w+)?(?:\s|$)/, async function (msg) {
-    try {
-      await bot.sendMessage(
-        msg.chat.id,
-        '✅ Bot is live.\n' +
-        'Mini App URL: ' + (CONFIG.miniAppUrl || '(none)') + '\n' +
-        'Hub domain: ' + (CONFIG.hubDomain || '(unknown)') + '\n' +
-        'Cookie secure: ' + (CONFIG.cookieSecure ? 'yes' : 'no')
-      );
-    } catch (e) { console.error('[bot] /test failed:', e.message); }
-  });
-
-  // ---- WebApp data ----
-  bot.on('web_app_data', function (msg) {
-    console.log('[bot] web_app_data from', msg.from && msg.from.id, ':', msg.web_app_data && msg.web_app_data.data);
-  });
-
-  // ---- Non-command fallback ----
-  bot.on('message', function (msg) {
-    if (!msg.text || msg.text.startsWith('/')) return;
-    bot.sendMessage(msg.chat.id, 'Send /start to open the Priv L7 Hub.')
-      .catch(function (e) { console.error('[bot] fallback reply failed:', e.message); });
-  });
-
-  // ---- Polling errors ----
-  bot.on('polling_error', function (e) {
-    const code = (e && e.response && e.response.statusCode) || 0;
-    const desc = (e && e.response && e.response.body && e.response.body.description) || e.message || '';
-    if (code === 401) {
-      console.error('[bot] FATAL: BOT_TOKEN rejected by Telegram (401). Bot disabled.');
-      console.error('[bot]   ', desc);
-      try { bot.stopPolling(); } catch (_) {}
-      bot = null;
-    } else if (code === 409) {
-      console.error('[bot] CONFLICT: another instance is polling this bot token. Stop it.');
-    } else if (code === 400 && /webhook/i.test(desc)) {
-      console.error('[bot] A webhook is set on this bot — remove it with deleteWebhook. Details:', desc);
-    } else {
-      console.error('[bot] polling error (' + code + '):', desc);
-    }
-  });
-}
-
-startTelegramBot();
-
 /* ---------- START ---------- */
 reattachSessions();
 
@@ -2657,9 +2455,8 @@ const server = app.listen(CONFIG.port, CONFIG.host, function () {
   console.log('  Admin          ->  unlimited duration / threads / rate / concurrent / no cooldown');
   console.log('  Users          ->  per-user limits (0 = unlimited), cooldown, expiry');
   console.log('  Default CD     ->  ' + CONFIG.defaultCooldown + 's');
-  console.log('  Bot token      ->  ' + (CONFIG.botToken ? 'present (…' + CONFIG.botToken.slice(-6) + ')' : 'MISSING — Telegram bot disabled'));
-  console.log('  Mini App URL   ->  ' + (CONFIG.miniAppUrl || '(none — /start will warn)'));
   console.log('  Hub domain     ->  ' + (CONFIG.hubDomain || '(unknown)'));
+  console.log('  Telegram bot   ->  managed by privbot.service (bot.js)');
   console.log('');
 });
 
@@ -2674,7 +2471,6 @@ function shutdown(sig) {
     } catch (e) {}
   }
   try { _auditStream.end(); } catch (e) {}
-  if (bot) { try { bot.stopPolling(); } catch (e) {} }
   server.close(function () { process.exit(0); });
   setTimeout(function () { process.exit(0); }, 2000).unref();
 }
